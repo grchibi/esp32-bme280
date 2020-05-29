@@ -1,0 +1,9 @@
+build/
+
+sdkconfig
+
+main/AmazonRootCA1.pem
+main/certificate.pem.crt
+main/private.pem.key
+
+main/include/tt_sec.h
