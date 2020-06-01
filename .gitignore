@@ -1,6 +1,6 @@
 build/
 
-sdkconfig
+sdkconfig*
 
 main/AmazonRootCA1.pem
 main/certificate.pem.crt

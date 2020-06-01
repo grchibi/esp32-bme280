@@ -29,9 +29,6 @@
 #define ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
 #define ESP_MAXIMUM_RETRY  5
 
-/* FreeRTOS event group to signal when we are connected*/
-static EventGroupHandle_t s_wifi_event_group;
-
 /* The event group allows multiple bits for each event, but we only care about two events:
  * - we are connected to the AP with an IP
  * - we failed to connect after the maximum amount of retries */
@@ -49,8 +46,16 @@ static const char* MQTT_BROKER_TOPIC = TT_MQTT_B_TOPIC;
  * LOG TAGGING
  */
 static const char* TAG_APP = "APP";
+static const char* TAG_SNTP = "SNTP";
+static const char* TAG_TASK = "TASK";
 static const char* TAG_MQTT = "MQTT";
 static const char* TAG_WIFI = "WI-FI";
+
+/**
+ * VARIABLES
+ */
+RTC_DATA_ATTR static int ntp_cycle_cnt = 0;
+static time_t waked_up_time = -1;
 
 
 /**
@@ -71,8 +76,11 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG_MQTT, "MQTT_EVENT_CONNECTED");
-/*            msg_id = esp_mqtt_client_publish(client, MQTT_BROKER_TOPIC, "unko", 0, 0, 0);
-            ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d", msg_id);*/
+            
+            msg_id = esp_mqtt_client_publish(client, MQTT_BROKER_TOPIC, "unko", 0, 0, 0);
+            ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d", msg_id);
+
+            sleep_deeply();     // fall into deep sleep.
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG_MQTT, "MQTT_EVENT_DISCONNECTED");
@@ -102,6 +110,7 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
     return ESP_OK;
 }
 
+static EventGroupHandle_t s_wifi_event_group;   // FreeRTOS event group to signal when we are connected
 static TickType_t retryDelayMS = 0;
 static const TickType_t maxRetryDelayMS = 300000;   // 5min
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -145,7 +154,7 @@ void init_datetime(void)
     time_t now = 0;
     struct tm timeinfo = { 0 };
     while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
-        ESP_LOGI(TAG_APP, "Waiting for system time to be set...");
+        ESP_LOGI(TAG_SNTP, "Waiting for system time to be set...");
         vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     time(&now);
@@ -156,7 +165,18 @@ void init_datetime(void)
     tzset();
     localtime_r(&now, &timeinfo);
     strftime(buff, sizeof(buff), "%c", &timeinfo);
-    ESP_LOGI(TAG_APP, "Current datetime in JST: %s", buff);
+    ESP_LOGI(TAG_SNTP, "Current datetime in JST: %s", buff);
+}
+
+void init_nvs()
+{
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 }
 
 void init_sntp()
@@ -168,7 +188,7 @@ void init_sntp()
 
     sntp_init();
 
-    ESP_LOGI(TAG_APP, "SNTP was initialized.");
+    ESP_LOGI(TAG_SNTP, "SNTP was initialized.");
 }
 
 void init_wifi(void)
@@ -229,7 +249,12 @@ void init_wifi(void)
  * FUNCTIONS
  */
 
-uint64_t get_usec_for_alarm()
+void bme280_task_start()
+{
+
+}
+
+int get_sec_for_alarm_00()
 {
     time_t now = 0;
     struct tm timeinfo = { 0 };
@@ -240,36 +265,32 @@ uint64_t get_usec_for_alarm()
     tzset();*/
     localtime_r(&now, &timeinfo);
 
-    return ((60 - timeinfo.tm_min - 1) * 60 * 1000000) + ((60 - timeinfo.tm_sec) * 1000000);
+    return ((60 - timeinfo.tm_min - 1) * 60) + (60 - timeinfo.tm_sec);
 }
 
 void initialize(void)
 {
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_ULP) {
-        // Initialize Wi-Fi
-        init_wifi();
+    // Initialize NVS
+    init_nvs();
 
+    // Initialize Wi-Fi
+    init_wifi();
+
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         // sometimes synchronize the system time
-
+        if (24 <= ntp_cycle_cnt) {
+            init_datetime();
+            ntp_cycle_cnt = 0;
+        }
 
     } else {
-        // Initialize NVS
-        esp_err_t ret = nvs_flash_init();
-        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-        }
-        ESP_ERROR_CHECK(ret);
-
-        // Initialize Wi-Fi
-        init_wifi();
-
         // Initialize local datetime
         init_datetime();
+
     }
 }
 
-void mqtt_app_start(void)
+void mqtt_task_start(void)
 {
     ESP_ERROR_CHECK(esp_tls_init_global_ca_store());
     ESP_ERROR_CHECK(esp_tls_set_global_ca_store(
@@ -301,6 +322,31 @@ void run_lchika(void)
     }
 }
 
+void run_task(void)
+{
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+        //bme280_task_start();
+        mqtt_task_start();
+
+    } else {
+        sleep_deeply();
+
+    }
+}
+
+void sleep_deeply()
+{
+    ESP_ERROR_CHECK(esp_wifi_stop());
+
+    int sleep_sec = get_sec_for_alarm_00();
+    ESP_LOGI(TAG_TASK, "Falling into a deep sleep...%ds", sleep_sec);
+
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    esp_sleep_enable_timer_wakeup((uint64_t)sleep_sec * 1000000);
+
+    esp_deep_sleep_start();
+}
+
 void time_sync_notification_cb(struct timeval *tv)
 {
     ESP_LOGI(TAG_APP, "Notification of a time synchronization event");
@@ -313,21 +359,26 @@ void time_sync_notification_cb(struct timeval *tv)
 
 void app_main(void)
 {
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_ULP) {
+    int wakeup_cause = esp_sleep_get_wakeup_cause();
+
+    if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
         ESP_LOGI(TAG_APP, "Wake up from deep sleep..");
+        ntp_cycle_cnt++;
+        time(&waked_up_time);
+
     } else {
-        ESP_LOGI(TAG_APP, "Startup..");
+        ESP_LOGI(TAG_APP, "Startup..%d", wakeup_cause);
         ESP_LOGI(TAG_APP, "Free memory: %d bytes", esp_get_free_heap_size());
         ESP_LOGI(TAG_APP, "IDF version: %s", esp_get_idf_version());
     }
 
     initialize();
 
-    mqtt_app_start();
+    run_task();
+
     //xTaskCreate(&http_get_task, "http_get_task", 4096, NULL, 5, NULL);
 
-
     // L Chika
-    gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);
-    run_lchika();
+    //gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);
+    //run_lchika();
 }

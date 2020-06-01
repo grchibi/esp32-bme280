@@ -2,8 +2,9 @@
  * bme280.h
  */
 
-uint64_t get_usec_for_alarm(void);
+int get_sec_for_alarm_00(void);
 void init_sntp(void);
+void sleep_deeply(void);
 void time_sync_notification_cb(struct timeval*);
 
 
