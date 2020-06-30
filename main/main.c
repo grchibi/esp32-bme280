@@ -1,60 +1,20 @@
-#include <stdio.h>
-#include <sys/time.h>
-#include <time.h>
+/**
+ * main.c
+ */
 
-#include "esp_sntp.h"
-#include "driver/gpio.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "esp_sleep.h"
-#include "esp_system.h"
-#include "esp_tls.h"
-#include "esp_wifi.h"
-#include "freertos/event_groups.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "mqtt_client.h"
-#include "nvs_flash.h"
+#include "tt_sec.h"
+#include "tt_bme280.h"
 
 #include "bme280.h"
-#include "tt_sec.h"
 
-
-/* The examples use WiFi configuration that you can set via project configuration menu
-
-   If you'd rather not, just change the below entries to strings with
-   the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
-*/
-#define ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
-#define ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
-#define ESP_MAXIMUM_RETRY  5
-
-/* The event group allows multiple bits for each event, but we only care about two events:
- * - we are connected to the AP with an IP
- * - we failed to connect after the maximum amount of retries */
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
-
-/*
- * MQTT
- */
-static const char* MQTT_BROKER_HOST = TT_MQTT_B_HOST;
-static const int MQTT_BROKER_PORT = TT_MQTT_B_PORT;
-static const char* MQTT_BROKER_TOPIC = TT_MQTT_B_TOPIC;
 
 /**
- * LOG TAGGING
+ * STATIC VARIABLES
  */
-static const char* TAG_APP = "APP";
-static const char* TAG_SNTP = "SNTP";
-static const char* TAG_TASK = "TASK";
-static const char* TAG_MQTT = "MQTT";
-static const char* TAG_WIFI = "WI-FI";
-
-/**
- * VARIABLES
- */
+static char s_last_js[128] = "";
 RTC_DATA_ATTR static int ntp_cycle_cnt = 0;
+static xQueueHandle s_pubAlarmQueue;
+static TaskHandle_t s_taskHandle;
 static time_t waked_up_time = -1;
 
 
@@ -62,30 +22,25 @@ static time_t waked_up_time = -1;
  * EVENT HANDLERS
  */
 
-extern const uint8_t root_ca_pem_start[] asm("_binary_AmazonRootCA1_pem_start");
-extern const uint8_t root_ca_pem_end[] asm("_binary_AmazonRootCA1_pem_end");
-extern const uint8_t client_cert_pem_start[] asm("_binary_certificate_pem_crt_start");
-extern const uint8_t client_cert_pem_end[] asm("_binary_certificate_pem_crt_end");
-extern const uint8_t client_key_pem_start[] asm("_binary_private_pem_key_start");
-extern const uint8_t client_key_pem_end[] asm("_binary_private_pem_key_end");
 static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 {
     esp_mqtt_client_handle_t client = event->client;
     int msg_id;
-    // your_context_t *context = event->context;
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG_MQTT, "MQTT_EVENT_CONNECTED");
             
-            msg_id = esp_mqtt_client_publish(client, MQTT_BROKER_TOPIC, "unko", 0, 0, 0);
-            ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d", msg_id);
+            char* my_data = (char*)event->user_context;
+            msg_id = esp_mqtt_client_publish(client, MQTT_BROKER_TOPIC, my_data, 0, 0, 0);
+            ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d, data=> %s", msg_id, my_data);
 
-            sleep_deeply();     // fall into deep sleep.
+            int cause = 1;
+            xQueueSend(s_pubAlarmQueue, &cause, 0);
+
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG_MQTT, "MQTT_EVENT_DISCONNECTED");
             break;
-
         case MQTT_EVENT_SUBSCRIBED:
             ESP_LOGI(TAG_MQTT, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
             break;
@@ -109,6 +64,7 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
     }
     return ESP_OK;
 }
+
 
 static EventGroupHandle_t s_wifi_event_group;   // FreeRTOS event group to signal when we are connected
 static TickType_t retryDelayMS = 0;
@@ -168,6 +124,20 @@ void init_datetime(void)
     ESP_LOGI(TAG_SNTP, "Current datetime in JST: %s", buff);
 }
 
+void init_i2c()
+{
+    i2c_config_t i2c_config = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = SDA_PIN,
+        .scl_io_num = SCL_PIN,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 20000   //1000000
+    };
+    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &i2c_config));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0));
+}
+
 void init_nvs()
 {
     // Initialize NVS
@@ -189,6 +159,25 @@ void init_sntp()
     sntp_init();
 
     ESP_LOGI(TAG_SNTP, "SNTP was initialized.");
+}
+
+void init_timer(void)
+{
+    timer_config_t config = {
+        .divider = TIMER_DIVIDER,
+        .counter_dir = TIMER_COUNT_UP,
+        .counter_en = TIMER_PAUSE,
+        .alarm_en = TIMER_ALARM_EN
+    };
+    timer_init(TIMER_GROUP_0, TIMER_0, &config);
+
+    timer_set_counter_value(TIMER_GROUP_0, TIMER_0, 0x00000000ULL);
+
+    timer_set_alarm_value(TIMER_GROUP_0, TIMER_0, 300 * (TIMER_BASE_CLK / TIMER_DIVIDER));   // 5min
+    timer_enable_intr(TIMER_GROUP_0, TIMER_0);
+    timer_isr_register(TIMER_GROUP_0, TIMER_0, onTimer, NULL, ESP_INTR_FLAG_IRAM, NULL);
+
+    timer_start(TIMER_GROUP_0, TIMER_0);
 }
 
 void init_wifi(void)
@@ -249,9 +238,113 @@ void init_wifi(void)
  * FUNCTIONS
  */
 
-void bme280_task_start()
+void bme280_print_sensor_data(char* s_out, struct bme280_data* comp_data)
 {
+    float temp, press, hum;
 
+#ifdef BME280_FLOAT_ENABLE
+    temp = comp_data->temperature;
+    press = 0.01 * comp_data->pressure;
+    hum = comp_data->humidity;
+#else
+#ifdef BME280_64BIT_ENABLE
+    temp = 0.01f * comp_data->temperature;
+    press = 0.0001f * comp_data->pressure;
+    hum = 1.0f / 1024.0f * comp_data->humidity;
+#else
+    temp = 0.01f * comp_data->temperature;
+    press = 0.01f * comp_data->pressure;
+    hum = 1.0f / 1024.0f * comp_data->humidity;
+#endif
+#endif
+
+    ESP_LOGI(TAG_I2C, "Measurement Data: %0.2lf C, %0.2lf hPa, %0.2lf %%", temp, press, hum);
+
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    char buff[16];
+    time(&now);
+    setenv("TZ", "JST-9", 1);
+    tzset();
+    localtime_r(&now, &timeinfo);
+    strftime(buff, sizeof(buff), "+%Y%m%d%H%M", &timeinfo);
+    sprintf(s_out, "{\"dsrc\": \"%s\", \"dt\": \"%s\", \"t\": %0.2lf, \"p\": %0.2lf, \"h\": %0.2lf}", TT_DSRC, buff, temp, press, hum);
+}
+
+int8_t bme280_ready(struct bme280_dev* bme280)
+{
+    int8_t rslt = BME280_OK;
+
+    bme280->dev_id = BME280_I2C_ADDR_PRIM;
+    bme280->intf = BME280_I2C_INTF;
+    bme280->read = (void*)user_i2c_read;
+    bme280->write = (void*)user_i2c_write;
+    bme280->delay_ms = (void*)user_delay_ms;
+
+    rslt = bme280_init(bme280);
+    if (rslt == BME280_OK) {
+        ESP_LOGI(TAG_I2C, "BME280 init result OK.");
+    } else {
+        ESP_LOGE(TAG_I2C, "Failed to initialize the BME280 device: %d", rslt);
+    }
+    
+    bme280->settings.osr_h = BME280_OVERSAMPLING_4X;
+    bme280->settings.osr_p = BME280_OVERSAMPLING_4X;
+    bme280->settings.osr_t = BME280_OVERSAMPLING_4X;
+    bme280->settings.filter = BME280_FILTER_COEFF_OFF;
+
+    uint8_t settings_sel = BME280_OSR_PRESS_SEL | BME280_OSR_TEMP_SEL | BME280_OSR_HUM_SEL | BME280_FILTER_SEL;
+    rslt = bme280_set_sensor_settings(settings_sel, bme280);
+    if (rslt == BME280_OK) {
+        ESP_LOGI(TAG_I2C, "BME280 settings result OK.");
+    } else {
+        ESP_LOGE(TAG_I2C, "Failed to set the BME280 settings: %d", rslt);
+    }
+
+    return rslt;
+}
+
+// This API reads the sensor temperature, pressure and humidity data in normal mode.
+int8_t bme280_stream_sensor_data_forced_mode(struct bme280_data* comp_data, struct bme280_dev* bme280)
+{
+    int8_t rslt = BME280_OK;
+
+    uint32_t req_delay = 2 * bme280_cal_meas_delay(&bme280->settings);
+    ESP_LOGI(TAG_I2C, "reg_delay => %d", req_delay);
+
+    /* get stream sensor data */
+    rslt = bme280_set_sensor_mode(BME280_FORCED_MODE, bme280);
+    if (rslt != BME280_OK) {
+        ESP_LOGE(TAG_I2C, "Failed to set sensor mode: %d", rslt);
+        return rslt;
+    }
+
+    bme280->delay_ms(req_delay);
+    rslt = bme280_get_sensor_data(BME280_ALL, comp_data, bme280);
+    if (rslt != BME280_OK) {
+        ESP_LOGE(TAG_I2C, "Failed to get sensor data: %d", rslt);
+        return rslt;
+    }
+
+    return rslt;
+}
+
+int8_t bme280_task_start(char* s_out)
+{
+    int8_t rslt = BME280_OK;
+
+    struct bme280_dev bme280;
+    struct bme280_data comp_data;
+
+    rslt = bme280_ready(&bme280);
+    if (rslt == BME280_OK) {
+        rslt = bme280_stream_sensor_data_forced_mode(&comp_data, &bme280);
+
+        if (rslt == BME280_OK)
+            bme280_print_sensor_data(s_out, &comp_data);
+    }
+
+    return rslt;
 }
 
 int get_sec_for_alarm_00()
@@ -281,6 +374,8 @@ void initialize(void)
         if (24 <= ntp_cycle_cnt) {
             init_datetime();
             ntp_cycle_cnt = 0;
+        } else {
+            ntp_cycle_cnt++;
         }
 
     } else {
@@ -288,9 +383,26 @@ void initialize(void)
         init_datetime();
 
     }
+
+    // Initialize I2C
+    init_i2c();
+
+    // Initialize Timer
+    init_timer();
 }
 
-void mqtt_task_start(void)
+void killer_task(void* args)
+{
+    ESP_LOGI(TAG_TASK_K, "waiting for being received the alarm...");
+    xTaskNotifyWait(0, 0, NULL, portMAX_DELAY);
+
+    ESP_LOGI(TAG_TASK_K, "time up!");
+    //s_mqtt_published = TRUE;     // for falling into deep sleep.
+
+    vTaskDelete(NULL);
+}
+
+esp_mqtt_client_handle_t mqtt_task_start(char* out_js)
 {
     ESP_ERROR_CHECK(esp_tls_init_global_ca_store());
     ESP_ERROR_CHECK(esp_tls_set_global_ca_store(
@@ -305,14 +417,23 @@ void mqtt_task_start(void)
         .event_handle = mqtt_event_handler,
         .client_cert_pem = (const char *)client_cert_pem_start,
         .client_key_pem = (const char *)client_key_pem_start,
-        .use_global_ca_store = true
+        .use_global_ca_store = true,
+        .user_context = out_js
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_start(client);
+
+    return client;
 }
 
-void run_lchika(void)
+void IRAM_ATTR onTimer(void* args)
+{
+    int cause = 2;
+    xQueueSendFromISR(s_pubAlarmQueue, &cause, NULL);
+}
+
+void run_lchika()
 {
     int level = 0;
     while (true) {
@@ -322,15 +443,47 @@ void run_lchika(void)
     }
 }
 
-void run_task(void)
+void run_task(void* args)
 {
+    int8_t rslt = BME280_OK;
+    esp_mqtt_client_handle_t mqtt_client = NULL;
+
+    /** TEST begin **/
+    /*rslt = bme280_task_start(s_last_js);
+    if (rslt == BME280_OK) {
+        ESP_LOGI(TAG_TASK, "JSON Data on test => %s", s_last_js);
+        mqtt_client = mqtt_task_start(s_last_js);
+    }*/
+    /** TEST end **/
+
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-        //bme280_task_start();
-        mqtt_task_start();
+        rslt = bme280_task_start(s_last_js);
+
+        if (rslt == BME280_OK) {
+            ESP_LOGI(TAG_TASK, "JSON Data => %s", s_last_js);
+            mqtt_client = mqtt_task_start(s_last_js);
+        }
 
     } else {
         sleep_deeply();
+    }
 
+    while (1) {
+        int recData = 0;
+
+        xQueueReceive(s_pubAlarmQueue, &recData, portMAX_DELAY);
+        ESP_LOGI(TAG_TASK, "received MQTT published alarm: CAUSE(%d)", recData);
+
+        if (mqtt_client != NULL) {
+            esp_mqtt_client_stop(mqtt_client);
+            sleep_deeply();     // fall into deep sleep.
+
+        } else {
+            ESP_LOGE(TAG_TASK, "MQTT Error occurred. Falling into deep sleep...");
+            sleep_deeply();     // fall into deep sleep.
+        }
+
+        vTaskDelay(portMAX_DELAY);
     }
 }
 
@@ -352,6 +505,67 @@ void time_sync_notification_cb(struct timeval *tv)
     ESP_LOGI(TAG_APP, "Notification of a time synchronization event");
 }
 
+void user_delay_ms(uint32_t ms)
+{
+    vTaskDelay(ms / portTICK_PERIOD_MS);
+}
+
+int8_t user_i2c_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_data, uint16_t cnt)
+{
+    int32_t iError = 0;
+
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg_addr, true);
+
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_READ, true);
+
+    if (1 < cnt) {
+        i2c_master_read(cmd, reg_data, cnt - 1, 0);     // I2C_MASTER_ACK
+    }
+    i2c_master_read_byte(cmd, reg_data + cnt - 1, 1);   // I2C_MASTER_NACK
+    i2c_master_stop(cmd);
+
+    esp_err_t espRc = i2c_master_cmd_begin(I2C_NUM_0, cmd, 200 / portTICK_PERIOD_MS);
+    if (espRc == ESP_OK) {
+        iError = 0;     // SUCCESS
+    } else {
+        iError = -1;    // FAIL
+    }
+
+    i2c_cmd_link_delete(cmd);
+
+    return (int8_t)iError;
+}
+
+int8_t user_i2c_write(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_data, uint16_t cnt)
+{
+    int32_t iError = 0;
+
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
+
+    i2c_master_write_byte(cmd, reg_addr, true);
+    i2c_master_write(cmd, reg_data, cnt, true);
+    i2c_master_stop(cmd);
+
+    esp_err_t espRc = i2c_master_cmd_begin(I2C_NUM_0, cmd, 200 / portTICK_PERIOD_MS);
+    if (espRc == ESP_OK) {
+        iError = 0;     // SUCCESS
+    } else {
+        iError = -1;    // FAIL
+    }
+
+    i2c_cmd_link_delete(cmd);
+
+    return (int8_t)iError;
+}
+
 
 /**
  * MAIN
@@ -363,7 +577,6 @@ void app_main(void)
 
     if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
         ESP_LOGI(TAG_APP, "Wake up from deep sleep..");
-        ntp_cycle_cnt++;
         time(&waked_up_time);
 
     } else {
@@ -374,9 +587,9 @@ void app_main(void)
 
     initialize();
 
-    run_task();
+    s_pubAlarmQueue = xQueueCreate(4, sizeof(int));
 
-    //xTaskCreate(&http_get_task, "http_get_task", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(&run_task, "run_task", 4096, NULL, 1, &s_taskHandle, APP_CPU_NUM);
 
     // L Chika
     //gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);

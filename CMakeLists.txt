@@ -8,3 +8,5 @@ project(bme280)
 target_add_binary_data(${CMAKE_PROJECT_NAME}.elf "main/AmazonRootCA1.pem" TEXT)
 target_add_binary_data(${CMAKE_PROJECT_NAME}.elf "main/certificate.pem.crt" TEXT)
 target_add_binary_data(${CMAKE_PROJECT_NAME}.elf "main/private.pem.key" TEXT)
+
+list(APPEND EXTRA_COMPONENT_DIRS BME280_driver)
