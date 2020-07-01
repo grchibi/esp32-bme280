@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_tls.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"

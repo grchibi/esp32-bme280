@@ -124,6 +124,18 @@ void init_datetime(void)
     ESP_LOGI(TAG_SNTP, "Current datetime in JST: %s", buff);
 }
 
+void init_esp_timer()
+{
+    const esp_timer_create_args_t timerArgs = {
+        .callback = &onTimer,
+        .name = "esp_timer"
+    };
+    esp_timer_handle_t timerHandle;
+    ESP_ERROR_CHECK(esp_timer_create(&timerArgs, &timerHandle));
+
+    ESP_ERROR_CHECK(esp_timer_start_once(timerHandle, 300000000));  // 5min
+}
+
 void init_i2c()
 {
     i2c_config_t i2c_config = {
@@ -388,7 +400,8 @@ void initialize(void)
     init_i2c();
 
     // Initialize Timer
-    init_timer();
+    //init_timer();
+    init_esp_timer();
 }
 
 void killer_task(void* args)
@@ -430,7 +443,12 @@ esp_mqtt_client_handle_t mqtt_task_start(char* out_js)
 void IRAM_ATTR onTimer(void* args)
 {
     int cause = 2;
-    xQueueSendFromISR(s_pubAlarmQueue, &cause, NULL);
+    /*BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(s_pubAlarmQueue, &cause, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }*/
+    xQueueSend(s_pubAlarmQueue, &cause, 0);
 }
 
 void run_lchika()
@@ -472,6 +490,13 @@ void run_task(void* args)
         int recData = 0;
 
         xQueueReceive(s_pubAlarmQueue, &recData, portMAX_DELAY);
+        /*BaseType_t xTaskWokenByReceive = pdFALSE;
+        while (!xQueueReceiveFromISR(s_pubAlarmQueue, &recData, &xTaskWokenByReceive)) {
+            vTaskDelay(1000);
+        }
+        if (xTaskWokenByReceive) {
+            taskYIELD();
+        }*/
         ESP_LOGI(TAG_TASK, "received MQTT published alarm: CAUSE(%d)", recData);
 
         if (mqtt_client != NULL) {
@@ -589,7 +614,7 @@ void app_main(void)
 
     s_pubAlarmQueue = xQueueCreate(4, sizeof(int));
 
-    xTaskCreatePinnedToCore(&run_task, "run_task", 4096, NULL, 1, &s_taskHandle, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&run_task, "run_task", 4096, NULL, 10, &s_taskHandle, APP_CPU_NUM);
 
     // L Chika
     //gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);
