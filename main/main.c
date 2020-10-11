@@ -981,16 +981,16 @@ void run_task(void* args)
             mqtt_client = mqtt_task_start(s_last_js);
         }
 #else
-        rslt = bme280_task_start(s_raw_adv_data);
+        rslt = bme280_task_start(s_raw_manufacturer_specific_data);
         if (rslt == BME280_OK) {
             s_adv_data.p_manufacturer_data = s_raw_manufacturer_specific_data;
             s_scan_rsp_data.p_manufacturer_data = s_raw_manufacturer_specific_data;
-            char msdata[66], tmpx[6];
-            for (int i = 0; i < 13; i++) {
-                sprintf(tmpx, "0x%02x ", s_raw_manufacturer_specific_data[i]);
-                strcpy(msdata + (5 * i), tmpx);
-            }
-            ESP_LOGI(TAG_TASK, "MANUFACTURER SPECIFIC DATA => %s", msdata);
+                char msdata[66], tmpx[6];
+                for (int i = 0; i < 13; i++) {
+                    sprintf(tmpx, "0x%02x ", s_raw_manufacturer_specific_data[i]);
+                    strcpy(msdata + (5 * i), tmpx);
+                }
+                ESP_LOGI(TAG_TASK, "MANUFACTURER SPECIFIC DATA => %s", msdata);
             s_adv_data.manufacturer_len = 14;
             s_scan_rsp_data.manufacturer_len = 14;
 
