@@ -29,6 +29,11 @@
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
 
+/**
+ * WiFi
+ */
+static bool s_wifi_initialized = false;
+
 /* The examples use WiFi configuration that you can set via project configuration menu
 
    If you'd rather not, just change the below entries to strings with

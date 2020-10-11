@@ -14,7 +14,9 @@
 /**
  * STATIC VARIABLES
  */
+#if !USE_BLE
 static char s_last_js[128] = "";
+#endif
 RTC_DATA_ATTR static int ntp_cycle_cnt = 0;
 static xQueueHandle s_pubAlarmQueue;
 static TaskHandle_t s_taskHandle;
@@ -549,6 +551,7 @@ void init_wifi(void)
 
     vTaskDelay(1);
     ESP_ERROR_CHECK(esp_wifi_start() );
+    s_wifi_initialized = true;
 
     ESP_LOGI(TAG_WIFI, "wifi_init_sta finished.");
 
@@ -838,15 +841,20 @@ void initialize(void)
     // Initialize NVS
     init_nvs();
 
+#if USE_BLE
+    // Initialize Bluetooth Low Energy
+    init_ble();
+#else
     // Initialize Wi-Fi
     init_wifi();
-
-    // Initialize Bluetooth
-    init_ble();
+#endif
 
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         // sometimes synchronize the system time
         if (24 <= ntp_cycle_cnt) {
+#if USE_BLE
+            init_wifi();        // Initialize Wi-Fi
+#endif
             init_datetime();
             ntp_cycle_cnt = 0;
         } else {
@@ -854,6 +862,10 @@ void initialize(void)
         }
 
     } else {
+#if USE_BLE
+            init_wifi();        // Initialize Wi-Fi
+#endif
+
         // Initialize local datetime
         init_datetime();
 
@@ -1023,7 +1035,9 @@ void run_task(void* args)
 
 void sleep_deeply()
 {
-    ESP_ERROR_CHECK(esp_wifi_stop());
+    if (s_wifi_initialized) {
+        ESP_ERROR_CHECK(esp_wifi_stop());
+    }
 
     int sleep_sec = get_sec_for_alarm_00();
     ESP_LOGI(TAG_TASK, "Falling into a deep sleep...%ds", sleep_sec);
@@ -1036,7 +1050,7 @@ void sleep_deeply()
 
 int substr(char* dest, const char* src, size_t pos, size_t len, size_t dest_len)
 {
-    if (pos < 0 || len < 0 || strlen(src) < len || dest_len < len + 1)
+    if (/*pos < 0 || len < 0 ||*/strlen(src) < len || dest_len < len + 1)
         return -1;
 
     if (pos < strlen(src)) {
