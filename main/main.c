@@ -2,7 +2,7 @@
  * main.c
  */
 
-#define ACTUAL_MODE 0
+#define ACTUAL_MODE 1
 #define USE_BLE 1
 
 #include "tt_sec.h"
@@ -583,6 +583,31 @@ void init_wifi(void)
  * FUNCTIONS
  */
 
+void adjust_time()
+{
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+        // sometimes synchronize the system time
+        if (5 <= ntp_cycle_cnt) {
+#if USE_BLE
+            init_wifi();        // Initialize Wi-Fi
+#endif
+            init_datetime();
+            ntp_cycle_cnt = 0;
+        } else {
+            ntp_cycle_cnt++;
+            ESP_LOGI(TAG_APP, "NTP Cycle Count (%d)", ntp_cycle_cnt);
+        }
+
+    } else {    // Initial Start Up
+#if USE_BLE
+            init_wifi();        // Initialize Wi-Fi
+#endif
+
+        // Initialize local datetime
+        init_datetime();
+    }
+}
+
 void bme280_convert_advertisement_data(uint8_t* out, struct bme280_data* comp_data)
 {
     float temp, press, hum;
@@ -849,28 +874,6 @@ void initialize(void)
     init_wifi();
 #endif
 
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-        // sometimes synchronize the system time
-        if (24 <= ntp_cycle_cnt) {
-#if USE_BLE
-            init_wifi();        // Initialize Wi-Fi
-#endif
-            init_datetime();
-            ntp_cycle_cnt = 0;
-        } else {
-            ntp_cycle_cnt++;
-        }
-
-    } else {
-#if USE_BLE
-            init_wifi();        // Initialize Wi-Fi
-#endif
-
-        // Initialize local datetime
-        init_datetime();
-
-    }
-
     // Initialize I2C
     init_i2c();
 
@@ -1035,6 +1038,8 @@ void run_task(void* args)
 
 void sleep_deeply()
 {
+    adjust_time();
+
     if (s_wifi_initialized) {
         ESP_ERROR_CHECK(esp_wifi_stop());
     }
