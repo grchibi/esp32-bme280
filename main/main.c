@@ -863,6 +863,11 @@ int get_sec_for_alarm_00()
 
 void initialize(void)
 {
+    // LED
+    gpio_set_direction(LED_BLUE_PIN, GPIO_MODE_DEF_OUTPUT);
+    gpio_set_level(LED_BLUE_PIN, 0);
+    gpio_set_level(LED_ORANGE_PIN, 1);
+
     // Initialize NVS
     init_nvs();
 
@@ -984,6 +989,9 @@ void run_task(void* args)
             mqtt_client = mqtt_task_start(s_last_js);
         }
 #else
+        // LED
+        gpio_set_level(LED_BLUE_PIN, 1);
+
         rslt = bme280_task_start(s_raw_manufacturer_specific_data);
         if (rslt == BME280_OK) {
             s_adv_data.p_manufacturer_data = s_raw_manufacturer_specific_data;
@@ -1038,6 +1046,10 @@ void run_task(void* args)
 
 void sleep_deeply()
 {
+    // LED
+    gpio_set_level(LED_BLUE_PIN, 0);
+    gpio_set_level(LED_ORANGE_PIN, 0);
+
     adjust_time();
 
     if (s_wifi_initialized) {

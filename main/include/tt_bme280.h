@@ -29,6 +29,12 @@
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
 
+/*
+ * I2C
+ */
+#define LED_BLUE_PIN GPIO_NUM_4
+#define LED_ORANGE_PIN GPIO_NUM_5
+
 /**
  * WiFi
  */
