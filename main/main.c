@@ -482,6 +482,21 @@ void init_i2c()
     ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0));
 }
 
+void init_led()
+{
+    // ORANGE
+    gpio_set_level(LED_ORANGE_PIN, 1);
+
+    // BLUE
+    //gpio_set_direction(LED_BLUE_PIN, GPIO_MODE_DEF_OUTPUT);
+
+    ledc_timer_config(&s_ledc_timer);
+    ledc_channel_config(&s_ledc_channel);
+
+    ledc_set_duty(s_ledc_channel.speed_mode, s_ledc_channel.channel, 0);
+    ledc_update_duty(s_ledc_channel.speed_mode, s_ledc_channel.channel);
+}
+
 void init_nvs()
 {
     // Initialize NVS
@@ -864,9 +879,7 @@ int get_sec_for_alarm_00()
 void initialize(void)
 {
     // LED
-    gpio_set_direction(LED_BLUE_PIN, GPIO_MODE_DEF_OUTPUT);
-    gpio_set_level(LED_BLUE_PIN, 0);
-    gpio_set_level(LED_ORANGE_PIN, 1);
+    init_led();
 
     // Initialize NVS
     init_nvs();
@@ -989,8 +1002,9 @@ void run_task(void* args)
             mqtt_client = mqtt_task_start(s_last_js);
         }
 #else
-        // LED
-        gpio_set_level(LED_BLUE_PIN, 1);
+        // BLUE LED
+        ledc_set_duty(s_ledc_channel.speed_mode, s_ledc_channel.channel, 1000);
+        ledc_update_duty(s_ledc_channel.speed_mode, s_ledc_channel.channel);
 
         rslt = bme280_task_start(s_raw_manufacturer_specific_data);
         if (rslt == BME280_OK) {
@@ -1047,7 +1061,8 @@ void run_task(void* args)
 void sleep_deeply()
 {
     // LED
-    gpio_set_level(LED_BLUE_PIN, 0);
+    ledc_set_duty(s_ledc_channel.speed_mode, s_ledc_channel.channel, 0);
+    ledc_update_duty(s_ledc_channel.speed_mode, s_ledc_channel.channel);
     gpio_set_level(LED_ORANGE_PIN, 0);
 
     adjust_time();

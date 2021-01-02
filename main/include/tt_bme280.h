@@ -9,6 +9,7 @@
 #include "esp_sntp.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
+#include "driver/ledc.h"
 #include "driver/timer.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -34,6 +35,26 @@
  */
 #define LED_BLUE_PIN GPIO_NUM_4
 #define LED_ORANGE_PIN GPIO_NUM_5
+
+/**
+ * LEDC
+ */
+static ledc_timer_config_t s_ledc_timer = {
+    .duty_resolution    = LEDC_TIMER_13_BIT,    // resolution of PWM duty
+    .freq_hz            = 5000,                 // frequency of PWM signal
+    .speed_mode         = LEDC_LOW_SPEED_MODE,  // timer mode
+    .timer_num          = LEDC_TIMER_0,         // timer index
+    .clk_cfg            = LEDC_AUTO_CLK         // Auto select the source clock
+};
+
+static ledc_channel_config_t s_ledc_channel = {
+    .channel    = LEDC_CHANNEL_0,
+    .duty       = 0,
+    .gpio_num   = GPIO_NUM_4,
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .hpoint     = 0,
+    .timer_sel  = LEDC_TIMER_0
+};
 
 /**
  * WiFi
